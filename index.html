@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <title>Monitor Prenotazioni</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{ --bg:#0a1a16; --panel:#102822; --line:#24493f; --text:#f5f5f2; --muted:#c9d6d1; --accent:#9b824c; }
+    body{ margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:linear-gradient(180deg,#0a1a16,#0d221c); color:var(--text); }
+    header{ display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--line); background:#0f211c; position:sticky; top:0; z-index:5;}
+    h1{ font-size:1.1rem; margin:0; letter-spacing:.3px;}
+    .btn{ background:var(--accent); color:#fff; border:none; border-radius:999px; padding:10px 14px; font-weight:700; cursor:pointer; }
+    .btn:disabled{ opacity:.6; cursor:not-allowed; }
+    .wrap{ max-width:980px; margin:18px auto; padding:0 12px;}
+    .card{ background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:16px; }
+    table{ width:100%; border-collapse:collapse; }
+    th,td{ padding:10px 8px; border-bottom:1px solid var(--line); font-size:.95rem; text-align:left; }
+    th{ color:var(--muted); font-weight:700; }
+    .pill{ display:inline-block; padding:4px 9px; border:1px solid var(--line); border-radius:999px; }
+    .muted{ color:var(--muted); }
+    .row-new{ animation:flash 1.2s ease 1; }
+    @keyframes flash { 0%{background:#16392f;} 100%{background:transparent;} }
+    .toolbar{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; align-items:center; }
+    input[type="search"]{ background:#0f251f; border:1px solid var(--line); border-radius:999px; padding:10px 12px; color:var(--text); min-width:220px; }
+    .badge{ background:#143329; border:1px solid var(--line); border-radius:10px; padding:6px 8px; font-size:.85rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🛎️ Monitor Prenotazioni</h1>
+    <div style="display:flex; gap:8px;">
+      <button id="notifyBtn" class="btn">Attiva notifiche</button>
+      <button id="soundBtn" class="btn">Suono: ON</button>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="toolbar">
+      <span class="badge">Aggiornamento: <span id="status" class="muted">—</span></span>
+      <input id="search" type="search" placeholder="Cerca in note/orario/data...">
+      <span class="badge">Nuove: <span id="newCount">0</span></span>
+    </div>
+
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Arrivo</th>
+            <th>Data</th>
+            <th>Ora</th>
+            <th>Persone</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+  // ===== CONFIG =====
+  const API = 'https://script.google.com/macros/s/AKfycbytvuxHvrg0XrMetUp6sa3_Rca9WInjUKZSSNo_TWNLKrb8NejXgbpZNEQfXotIGMWJ/exec';
+
+  // ===== STATE =====
+  let lastId = Number(localStorage.getItem('lastId') || 0);
+  let soundOn = true;
+  let items = [];
+
+  const $ = s=>document.querySelector(s);
+
+  // Suono sintetizzato (no file)
+  let actx;
+  function beep(){
+    if(!soundOn) return;
+    try{
+      if(!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.001, actx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.2, actx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.35);
+      o.connect(g); g.connect(actx.destination);
+      o.start(); o.stop(actx.currentTime + 0.4);
+    }catch(e){}
+  }
+
+  $('#soundBtn').addEventListener('click', ()=>{
+    soundOn = !soundOn;
+    $('#soundBtn').textContent = `Suono: ${soundOn?'ON':'OFF'}`;
+    if(soundOn) beep();
+  });
+
+  $('#notifyBtn').addEventListener('click', async ()=>{
+    try{
+      const p = await Notification.requestPermission();
+      if(p === 'granted'){
+        $('#notifyBtn').textContent = 'Notifiche attive';
+        $('#notifyBtn').disabled = true;
+        new Notification('Notifiche attive', {body:'Riceverai un avviso per ogni nuova prenotazione.'});
+        beep();
+      }else{
+        alert('Permesso notifiche negato dal browser.');
+      }
+    }catch(e){ console.error(e); }
+  });
+
+  $('#search').addEventListener('input', render);
+
+  function fmt(v){ return v==null ? '' : String(v); }
+
+  function render(){
+    const q = $('#search').value.trim().toLowerCase();
+    const tb = $('#tbody'); tb.innerHTML = '';
+    items
+      .filter(r=>{
+        if(!q) return true;
+        return (
+          String(r.id).includes(q) ||
+          fmt(r.date).toLowerCase().includes(q) ||
+          fmt(r.time).toLowerCase().includes(q) ||
+          fmt(r.people).toLowerCase().includes(q) ||
+          fmt(r.notes).toLowerCase().includes(q)
+        );
+      })
+      .sort((a,b)=>b.id - a.id)
+      .forEach(r=>{
+        const tr = document.createElement('tr');
+        if(r._new) tr.classList.add('row-new');
+        tr.innerHTML = `
+          <td>${r.id}</td>
+          <td><span class="pill">${fmt(r.timestamp)}</span></td>
+          <td>${fmt(r.date)}</td>
+          <td>${fmt(r.time)}</td>
+          <td>${fmt(r.people)}</td>
+          <td>${fmt(r.notes)}</td>
+        `;
+        tb.appendChild(tr);
+        r._new = false;
+      });
+  }
+
+  // ===== Polling via JSONP (no CORS) =====
+  function poll(){
+    const src = `${API}?since=${lastId||0}&callback=PV_JSONP`;
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onerror = ()=> $('#status').textContent = 'Errore connessione';
+    document.body.appendChild(s);
+    setTimeout(()=> s.remove(), 10000);
+  }
+
+  // Callback JSONP globale
+  function PV_JSONP(data){
+    try{
+      if(!data || !data.ok){ $('#status').textContent = 'API non ok'; return; }
+      $('#status').textContent = `OK ${new Date().toLocaleTimeString()}`;
+
+      if(Array.isArray(data.items) && data.items.length){
+        data.items.forEach(it=> it._new = true);
+        items = items.concat(data.items);
+        render();
+
+        lastId = data.lastId || lastId;
+        localStorage.setItem('lastId', String(lastId));
+
+        // Suono + notifica
+        beep();
+        if('Notification' in window && Notification.permission === 'granted'){
+          const latest = data.items[data.items.length-1];
+          new Notification('Nuova prenotazione', {
+            body: `Data ${latest.date} · Ora ${latest.time} · Persone ${latest.people}${latest.notes? ' · '+latest.notes:''}`
+          });
+        }
+        const nc = document.getElementById('newCount');
+        nc.textContent = String(Number(nc.textContent) + data.items.length);
+      }
+    }catch(e){
+      console.error(e);
+      $('#status').textContent = 'Errore parsing';
+    }
+  }
+  window.PV_JSONP = PV_JSONP;
+
+  // Avvio
+  poll();
+  setInterval(poll, 10000);
+</script>
+</body>
+</html>
